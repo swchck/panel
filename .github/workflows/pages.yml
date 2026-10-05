@@ -1,0 +1,69 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# a deploy that has already started is left to finish, cancelling it can leave Pages half-updated
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: site
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.EPANEL_REPO || 'swchck/epanel' }}
+          ref: ${{ vars.EPANEL_REF || 'main' }}
+          path: epanel
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: epanel/package-lock.json
+      - run: npm ci
+        working-directory: epanel
+      - name: Put this site's panel into the viewer
+        # the app repository ships its own demo as panel.enc.json; it must never end up on this site
+        run: |
+          rm -f epanel/public/app/panel.enc.json
+          if [ -f site/panel.enc.json ]; then cp site/panel.enc.json epanel/public/app/; fi
+      - name: Validate the panel
+        # without the secret the file stays opaque and only its envelope is checked
+        if: hashFiles('site/panel.enc.json') != ''
+        working-directory: epanel
+        env:
+          PANEL_PASSWORD: ${{ secrets.PANEL_PASSWORD }}
+        run: npm run validate
+      - name: Build the viewer
+        working-directory: epanel
+        env:
+          VITE_SITE: viewer
+        run: |
+          repo="${GITHUB_REPOSITORY#*/}"
+          if [[ "$repo" == *.github.io ]]; then export BASE_PATH=/; else export BASE_PATH="/$repo/"; fi
+          npx vite build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: epanel/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
